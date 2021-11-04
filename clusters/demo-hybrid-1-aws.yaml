@@ -1,0 +1,320 @@
+kind: Cluster
+metadata:
+  name: demo-hybrid-1-aws
+  space: default
+spec:
+  kublrAgentTgzUrl: 'https://repo.kublr.com/repository/gobinaries/kublr/1.20.9-18/kublr-1.20.9-18-linux.tar.gz'
+  locations:
+    - name: aws1
+      aws:
+        awsApiAccessSecretRef: aws
+        enableTerminationProtection: false
+        region: us-east-1
+        resourcesCloudFormationExtras:
+          SgDefaultSubmariner500:
+            Type: AWS::EC2::SecurityGroupIngress
+            Properties: 
+              GroupId: {"Fn::GetAtt": [NewVpc, DefaultSecurityGroup]}
+              CidrIp: 0.0.0.0/0
+              IpProtocol: udp
+              FromPort: 500
+              ToPort: 500
+          SgDefaultSubmariner4490:
+            Type: AWS::EC2::SecurityGroupIngress
+            Properties: 
+              GroupId: {"Fn::GetAtt": [NewVpc, DefaultSecurityGroup]}
+              CidrIp: 0.0.0.0/0
+              IpProtocol: udp
+              FromPort: 4490
+              ToPort: 4490
+          SgDefaultSubmariner4500:
+            Type: AWS::EC2::SecurityGroupIngress
+            Properties: 
+              GroupId: {"Fn::GetAtt": [NewVpc, DefaultSecurityGroup]}
+              CidrIp: 0.0.0.0/0
+              IpProtocol: udp
+              FromPort: 4500
+              ToPort: 4500
+  network:
+    clusterCIDR: 100.64.0.0/10
+    dnsDomain: cluster1.local
+    apiServerSecurePort: 6443
+    enableLocalDns: false
+    provider: cni-flannel
+    stubDomains:
+      - dns: cluster2.local
+        servers:
+          - 100.128.0.10
+  master:
+    minNodes: 1
+    kublrVariant: aws-ubuntu-20.04
+    kublrAgentConfig:
+      kublr:
+        psp:
+          default_clusterrole: 'psp:privileged'
+    locations:
+      - locationRef: aws1
+        aws:
+          instanceType: m5.large
+          groupType: asg-mip
+          mixedInstancesPolicyCloudFormationExtras:
+            InstancesDistribution:
+              OnDemandPercentageAboveBaseCapacity: 0
+            LaunchTemplate:
+              Overrides:
+                - InstanceType: m5.large
+                - InstanceType: t3.large
+          availabilityZones:
+            - us-east-1a
+          instanceMonitoring: false
+          rootVolume:
+            size: 40
+          sshKey: cloudify
+          subnetIds:
+            - ''
+  nodes:
+    - name: group1
+      minNodes: 3
+      kublrVariant: aws-ubuntu-20.04
+      stateful: true
+      kublrAgentConfig:
+        labels:
+          submariner.io/gateway: 'true'
+      locations:
+        - locationRef: aws1
+          aws:
+            instanceType: m5.xlarge
+            groupType: asg-mip
+            mixedInstancesPolicyCloudFormationExtras:
+              InstancesDistribution:
+                OnDemandPercentageAboveBaseCapacity: 0
+              LaunchTemplate:
+                Overrides:
+                  - InstanceType: m5.xlarge
+                  - InstanceType: t3.xlarge
+            instanceMonitoring: false
+            pinToZone: pin
+            rootVolume:
+              size: 40
+            availabilityZones:
+              - us-east-1a
+              - us-east-1b
+              - us-east-1c
+            sshKey: cloudify
+            subnetIds:
+              - ''
+              - ''
+              - ''
+  features:
+    kublrOperator:
+      chart:
+        version: 1.21.2-32
+      enabled: true
+    system:
+      chart:
+        version: 1.21.2-30
+    logging:
+      chart:
+        version: 1.21.2-37
+      logCollection:
+        enabled: false
+      sinks:
+        - selfHosted:
+            enabled: false
+            masterNodes: 1
+            dataNodes: 1
+            clientNodes: 1
+        - centralLogging:
+            enabled: true
+            persistent: true
+            size: 128G
+            masterNodes: 1
+            dataNodes: 1
+            clientNodes: 1
+            logstashReplicas: 1
+    monitoring:
+      chart:
+        version: 1.21.2-28
+      enabled: true
+      platformClient:
+        enabled: true
+        prometheus:
+          persistent: false
+    ingress:
+      chart:
+        version: 1.21.2-24
+      ingressControllers:
+        - nginx:
+            enabled: true
+            acme:
+              enabled: false
+      values:
+        nginx-ingress:
+          controller:
+            service:
+              annotations:
+                service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    kubedb:
+      chart:
+        version: 1.21.2-25
+      enabled: false
+  packages:
+    submariner-broker:
+      helmVersion: '3.4.0'
+      namespace: submariner-k8s-broker
+      releaseName: submariner-k8s-broker
+      chart:
+        name: submariner-k8s-broker
+        url: https://submariner-io.github.io/submariner-charts/charts/submariner-k8s-broker-0.11.0.tgz
+      values:
+        submariner:
+          serviceDiscovery: false
+    rook-ceph-additional-configuration:
+      helmVersion: '3.4.0'
+      namespace: kube-system
+      releaseName: rook-ceph-additional-configuration
+      chart:
+        name: raw
+        url: https://github.com/itscontained/charts/releases/download/raw-v0.2.5/raw-v0.2.5.tgz
+      values:
+        resources:
+          -
+            apiVersion: batch/v1
+            kind: Job
+            metadata:
+              name: rook-ceph-additional-configuration
+            spec:
+              template:
+                spec:
+                  serviceAccountName: tiller
+                  restartPolicy: OnFailure
+                  containers:
+                    - name: import-crd
+                      image: cr.kublr.com/bitnami/kubectl:1.21.5
+                      command:
+                        - sh
+                        - -c
+                        - |
+                          while ! kubectl get crd cephclusters.ceph.rook.io ; do echo waiting for ceph to install ; sleep 5 ; done
+                          kubectl apply \
+                            -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml \
+                            -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml \
+                            -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml \
+                            -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml \
+                            -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/master/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml \
+                            -f https://raw.githubusercontent.com/csi-addons/volume-replication-operator/v0.1.0/config/crd/bases/replication.storage.openshift.io_volumereplications.yaml \
+                            -f https://raw.githubusercontent.com/csi-addons/volume-replication-operator/v0.1.0/config/crd/bases/replication.storage.openshift.io_volumereplicationclasses.yaml && (
+                          kubectl apply -f - <<EOF
+                          apiVersion: ceph.rook.io/v1
+                          kind: CephRBDMirror
+                          metadata:
+                            name: my-rbd-mirror
+                            namespace: rook-ceph
+                          spec:
+                            count: 2
+                          EOF
+                          )
+              backoffLimit: 100
+          -
+            apiVersion: batch/v1beta1
+            kind: CronJob
+            metadata:
+              name: submariner-label-nodes
+            spec:
+              schedule: "*/1 * * * *"
+              successfulJobsHistoryLimit: 1
+              jobTemplate:
+                spec:
+                  template:
+                    spec:
+                      serviceAccountName: tiller
+                      restartPolicy: OnFailure
+                      containers:
+                        - name: label-nodes
+                          image: cr.kublr.com/bitnami/kubectl:1.21.5
+                          command:
+                            - sh
+                            - -c
+                            - |
+                              kubectl label nodes -l kublr.io/node-group=group1 --overwrite submariner.io/gateway=true
+                              for n in $(kubectl get nodes -l kublr.io/node-group=group1 -o name) ; do
+                                echo $n gateway.submariner.io/public-ip=ipv4:$(kubectl get $n -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}')
+                                kubectl annotate --overwrite $n gateway.submariner.io/public-ip=ipv4:$(kubectl get $n -o jsonpath='{.status.addresses[?(@.type=="ExternalIP")].address}')
+                              done
+    rook-ceph:
+      helmVersion: '3.4.0'
+      namespace: rook-ceph
+      releaseName: rook-ceph
+      chart:
+        name: rook-ceph
+        url: https://charts.rook.io/release/rook-ceph-v1.7.6.tgz
+      values:
+        csi:
+          enableOMAPGenerator: true
+          volumeReplication:
+            enabled: true
+    rook-ceph-cluster:
+      helmVersion: '3.4.0'
+      namespace: rook-ceph
+      releaseName: rook-ceph-cluster
+      chart:
+        name: rook-ceph-cluster
+        url: https://charts.rook.io/release/rook-ceph-cluster-v1.7.6.tgz
+      values:
+        # configOverride: {}
+        toolbox:
+          enabled: true
+        # monitoring:
+        #  enabled: true
+        cephClusterSpec:
+          cephVersion:
+            image: quay.io/ceph/ceph:v16.2.6
+          dataDirHostPath: /var/lib/rook
+          dashboard:
+            urlPrefix: /ceph-dashboard
+          mon:
+            count: 3
+            volumeClaimTemplate:
+              spec:
+                storageClassName: kublr-system
+                resources:
+                  requests:
+                    storage: 10Gi
+          storage:
+            useAllNodes: false
+            onlyApplyOSDPlacement: true
+            storageClassDeviceSets:
+            - name: set1
+              count: 3
+              placement:
+                podAntiAffinity:
+                  requiredDuringSchedulingIgnoredDuringExecution:
+                  - labelSelector:
+                      matchLabels:
+                        ceph.rook.io/DeviceSet: set1
+                    topologyKey: topology.kubernetes.io/zone
+              portable: true
+              encrypted: false
+              volumeClaimTemplates:
+              - metadata:
+                  name: data
+                spec:
+                  resources:
+                    requests:
+                      storage: 100Gi
+                  storageClassName: kublr-system
+                  volumeMode: Block
+                  accessModes:
+                    - ReadWriteOnce
+          placement:
+            mon:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      ceph_daemon_type: mon
+                  topologyKey: topology.kubernetes.io/zone
+        ingress:
+          dashboard:
+            host:
+              path: /ceph-dashboard
