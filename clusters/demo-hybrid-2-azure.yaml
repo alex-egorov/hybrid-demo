@@ -3,13 +3,56 @@ metadata:
   name: demo-hybrid-2-azure
   space: default
 spec:
+  features:
+    ingress:
+      chart:
+        version: 1.21.2-24
+      ingressControllers:
+        - nginx:
+            enabled: true
+            acme:
+              enabled: false
+    kubedb:
+      chart:
+        version: 1.21.2-25
+      enabled: false
+    kublrOperator:
+      chart:
+        version: 1.21.2-32
+      enabled: true
+    logging:
+      chart:
+        version: 1.21.2-37
+      logCollection:
+        enabled: false
+      sinks:
+        - selfHosted:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: false
+            masterNodes: 1
+        - centralLogging:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: true
+            logstashReplicas: 1
+            masterNodes: 1
+            persistent: true
+            size: 128G
+    monitoring:
+      chart:
+        version: 1.21.2-28
+      enabled: true
+      platformClient:
+        enabled: true
+        prometheus:
+          persistent: false
+    system:
+      chart:
+        version: 1.21.2-30
   kublrAgentTgzUrl: 'https://repo.kublr.com/repository/gobinaries/kublr/1.20.9-18/kublr-1.20.9-18-linux.tar.gz'
   locations:
-    - name: azure1
-      azure:
-        azureApiAccessSecretRef: azure
-        region: eastus
-        virtualNetworkSubnetCidrBlock: 172.18.0.0/16
+    - azure:
         armTemplateExtras:
           securityGroup:
             properties:
@@ -26,42 +69,17 @@ spec:
                     access: Allow
                     priority: 200
                     direction: Inbound
-  network:
-    clusterCIDR: 100.128.0.0/10
-    dnsDomain: cluster2.local
-    apiServerSecurePort: 6443
-    enableLocalDns: false
-    provider: cni-flannel
-    stubDomains:
-      - dns: cluster1.local
-        servers:
-          - 100.64.0.10
+        azureApiAccessSecretRef: azure
+        region: eastus
+        virtualNetworkSubnetCidrBlock: 172.18.0.0/16
+      name: azure1
   master:
-    minNodes: 1
     kublrAgentConfig:
       kublr:
         psp:
           default_clusterrole: 'psp:privileged'
     locations:
-      - locationRef: azure1
-        azure:
-          groupType: VirtualMachineScaleSet
-          zones:
-            - '1'
-          pinToZone: pin
-          sshKeySecretRef: ssh-pub
-          instanceType: Standard_D4s_v4
-          osDisk:
-            type: image
-            imagePublisher: Canonical
-            imageOffer: 0001-com-ubuntu-server-focal
-            imageVersion: 20_04-lts
-            diskSizeGb: 40
-          masterDataDisk:
-            lun: 1
-            diskSizeGb: 15
-          masterLBAllocationPolicy: privateAndPublic
-          masterLBSeparate: false
+      - azure:
           armTemplateExtras:
             scaleSet:
               apiVersion: '2021-07-01'
@@ -75,8 +93,38 @@ spec:
                 spotRestorePolicy:
                   enabled: true
                   restoreTimeout: P2D
+          groupType: VirtualMachineScaleSet
+          instanceType: Standard_D4s_v4
+          masterDataDisk:
+            lun: 1
+            diskSizeGb: 15
+          masterLBAllocationPolicy: privateAndPublic
+          masterLBSeparate: false
+          osDisk:
+            diskSizeGb: 40
+            imageOffer: 0001-com-ubuntu-server-focal
+            imagePublisher: Canonical
+            imageVersion: 20_04-lts
+            type: image
+          pinToZone: pin
+          sshKeySecretRef: ssh-pub
+          zones:
+            - '1'
+        locationRef: azure1
+    minNodes: 1
+  network:
+    apiServerSecurePort: 6443
+    clusterCIDR: 100.128.0.0/10
+    dnsDomain: cluster2.local
+    enableLocalDns: false
+    provider: cni-flannel
+    stubDomains:
+      - dns: cluster1.local
+        servers:
+          - 100.64.0.10
   nodes:
-    - name: group1
+    - autoscaling: false
+      name: group1
       minNodes: 3
       stateful: true
       kublrAgentConfig:
@@ -85,20 +133,6 @@ spec:
       locations:
         - locationRef: azure1
           azure:
-            groupType: VirtualMachineScaleSet
-            zones:
-              - '1'
-              - '2'
-              - '3'
-            pinToZone: pin
-            sshKeySecretRef: ssh-pub
-            instanceType: Standard_D4s_v4
-            osDisk:
-              type: image
-              imagePublisher: Canonical
-              imageOffer: 0001-com-ubuntu-server-focal
-              imageVersion: 20_04-lts
-              diskSizeGb: 40
             armTemplateExtras:
               ipConfiguration:
                 properties:
@@ -118,53 +152,20 @@ spec:
                   spotRestorePolicy:
                     enabled: true
                     restoreTimeout: P2D
-  features:
-    kublrOperator:
-      chart:
-        version: 1.21.2-32
-      enabled: true
-    system:
-      chart:
-        version: 1.21.2-30
-    logging:
-      chart:
-        version: 1.21.2-37
-      logCollection:
-        enabled: false
-      sinks:
-        - selfHosted:
-            enabled: false
-            masterNodes: 1
-            dataNodes: 1
-            clientNodes: 1
-        - centralLogging:
-            enabled: true
-            persistent: true
-            size: 128G
-            masterNodes: 1
-            dataNodes: 1
-            clientNodes: 1
-            logstashReplicas: 1
-    monitoring:
-      chart:
-        version: 1.21.2-28
-      enabled: true
-      platformClient:
-        enabled: true
-        prometheus:
-          persistent: false
-    ingress:
-      chart:
-        version: 1.21.2-24
-      ingressControllers:
-        - nginx:
-            enabled: true
-            acme:
-              enabled: false
-    kubedb:
-      chart:
-        version: 1.21.2-25
-      enabled: false
+            groupType: VirtualMachineScaleSet
+            instanceType: Standard_D4s_v4
+            osDisk:
+              diskSizeGb: 40
+              imageOffer: 0001-com-ubuntu-server-focal
+              imagePublisher: Canonical
+              imageVersion: 20_04-lts
+              type: image
+            pinToZone: pin
+            sshKeySecretRef: ssh-pub
+            zones:
+              - '1'
+              - '2'
+              - '3'
   packages:
     submariner-broker:
       helmVersion: '3.4.0'

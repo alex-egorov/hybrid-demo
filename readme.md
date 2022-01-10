@@ -320,7 +320,7 @@ kubectl get volumereplication block-pvc-volumereplication -oyaml
 Update data on the volume and check that the application sees it
 
 ```
-kubectl exec -it         deployment/blocktest -- sh -c 'echo $@ > /mnt/fs/file' sh Hello world 1
+kubectl exec -it         deployment/blocktest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world 1
 kubectl logs --tail=5 -f deployment/blocktest
 ```
 
@@ -362,6 +362,8 @@ kubectl scale deployment blocktest --replicas=0
 kubectl patch VolumeReplication block-pvc-volumereplication --type merge -p '{"spec":{"replicationState":"secondary"}}'
 ```
 
+Check AWS Ceph UI or use kubectl CLI and wait until the image is demoted there.
+
 Promote in Azure
 
 ```
@@ -375,16 +377,24 @@ Check that the application is started, sees replicated data, and update data on 
 
 ```
 kubectl logs --tail=5 -f deployment/blocktest
-kubectl exec -it         deployment/blocktest -- sh -c 'echo $@ > /mnt/fs/file' sh Hello world 2
+kubectl exec -it         deployment/blocktest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world 2
 ```
 
 ## 6.5. Switch back to AWS
+
+Scale down app and demote the image in Azure:
 
 ```
 export KUBECONFIG=config2az
 kubectl scale deployment blocktest --replicas=0
 kubectl patch VolumeReplication block-pvc-volumereplication --type merge -p '{"spec":{"replicationState":"secondary"}}'
+```
 
+Check Azure Ceph UI or use kubectl CLI and wait until the image is demoted there.
+
+Promote in AWS
+
+```
 export KUBECONFIG=config1aws
 kubectl patch VolumeReplication block-pvc-volumereplication --type merge -p '{"spec":{"replicationState":"primary"}}'
 kubectl scale deployment blocktest --replicas=1
@@ -442,6 +452,18 @@ spec:
 EOF
 ```
 
+Create some content on the FS volume:
+
+```
+kubectl exec -it deployment/sharedfstest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)"
+```
+
+Check the content on the FS volume:
+
+```
+kubectl exec -it deployment/sharedfstest -- sh -c 'cat /mnt/fs/file'
+```
+
 ## 7.2. Consume Block image
 
 ```
@@ -488,9 +510,21 @@ spec:
 EOF
 ```
 
+Create some content on the block volume:
+
+```
+kubectl exec -it deployment/imagetest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)"
+```
+
+Check the content on the block volume:
+
+```
+kubectl exec -it deployment/imagetest -- sh -c 'cat /mnt/fs/file'
+```
+
 # 8. Work with snapshots
 
-## 8.1. CephFS snapshot
+## 8.1. Create CephFS snapshot
 
 ```
 kubectl apply -f - <<EOF
@@ -524,7 +558,14 @@ Check snapshot
 kubectl get VolumeSnapshot
 ```
 
-## 8.2. RBD snapshot
+Update the content on the FS volume:
+
+```
+kubectl exec -it deployment/sharedfstest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)" '(after snapshot)'
+kubectl exec -it deployment/sharedfstest -- sh -c 'cat /mnt/fs/file'
+```
+
+## 8.2. Create RBD snapshot
 
 ```
 kubectl apply -f - <<EOF
@@ -544,7 +585,7 @@ kubectl apply -f - <<EOF
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
 metadata:
-  name: image-pvc-snapshot
+  name: image-pvc-snapshot1
 spec:
   volumeSnapshotClassName: csi-rbdplugin-snapclass
   source:
@@ -556,4 +597,269 @@ Check snapshot
 
 ```
 kubectl get VolumeSnapshot
+```
+
+Update the content on the block volume:
+
+```
+kubectl exec -it deployment/imagetest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)" '(after snapshot)'
+kubectl exec -it deployment/imagetest -- sh -c 'cat /mnt/fs/file'
+```
+
+## 8.3. Use CephFS snapshot to recover volume
+
+```
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cephfs-pvc-copy1
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ceph-filesystem
+  dataSource:
+    name: cephfs-pvc-snapshot1
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sharedfstest1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sharedfstest1
+  template:
+    metadata:
+      labels:
+        app: sharedfstest1
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: main
+        image: ubuntu
+        command: ["/bin/sh", -c, "sleep 72000"]
+        volumeMounts:
+        - name: fs
+          mountPath: /mnt/fs
+      volumes:
+      - name: fs
+        persistentVolumeClaim:
+          claimName: cephfs-pvc-copy1
+          readOnly: false
+EOF
+```
+
+Check the content on the FS volume created from snapshot as well as the original volume:
+
+```
+kubectl exec -it deployment/sharedfstest1 -- sh -c 'cat /mnt/fs/file'
+kubectl exec -it deployment/sharedfstest  -- sh -c 'cat /mnt/fs/file'
+```
+
+## 8.4. Use RBD snapshot to recover volume
+
+```
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-pvc-copy1
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ceph-block
+  dataSource:
+    name: image-pvc-snapshot1
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imagetest1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: imagetest1
+  template:
+    metadata:
+      labels:
+        app: imagetest1
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: main
+        image: ubuntu
+        command: ["/bin/sh", -c, "sleep 72000"]
+        volumeMounts:
+        - name: fs
+          mountPath: /mnt/fs
+      volumes:
+      - name: fs
+        persistentVolumeClaim:
+          claimName: image-pvc-copy1
+          readOnly: false
+EOF
+```
+
+Check the content on the block volume as well as the original volume:
+
+```
+kubectl exec -it deployment/imagetest1 -- sh -c 'cat /mnt/fs/file'
+kubectl exec -it deployment/imagetest  -- sh -c 'cat /mnt/fs/file'
+```
+
+# 9. Volume cloning
+
+## 9.1. Replicate a CephFS volume
+
+Update the content on the FS volume before cloning:
+
+```
+kubectl exec -it deployment/sharedfstest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)" '(before cloning)'
+kubectl exec -it deployment/sharedfstest -- sh -c 'cat /mnt/fs/file'
+```
+
+Create a volume by cloning the original:
+
+```
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cephfs-pvc-copy2
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ceph-filesystem
+  dataSource:
+    name: cephfs-pvc
+    kind: PersistentVolumeClaim
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sharedfstest2
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sharedfstest2
+  template:
+    metadata:
+      labels:
+        app: sharedfstest2
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: main
+        image: ubuntu
+        command: ["/bin/sh", -c, "sleep 72000"]
+        volumeMounts:
+        - name: fs
+          mountPath: /mnt/fs
+      volumes:
+      - name: fs
+        persistentVolumeClaim:
+          claimName: cephfs-pvc-copy2
+          readOnly: false
+EOF
+```
+
+Update the content on the original FS volume after cloning:
+
+```
+kubectl exec -it deployment/sharedfstest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)" '(after cloning)'
+```
+
+Check the content on the FS volume created by cloning as well as the original volume:
+
+```
+kubectl exec -it deployment/sharedfstest2 -- sh -c 'cat /mnt/fs/file'
+kubectl exec -it deployment/sharedfstest  -- sh -c 'cat /mnt/fs/file'
+```
+
+## 9.2. Replicate a RBD volume
+
+Update the content on the RBD volume before cloning:
+
+```
+kubectl exec -it deployment/imagetest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)" '(before cloning)'
+kubectl exec -it deployment/imagetest -- sh -c 'cat /mnt/fs/file'
+```
+
+Create a volume by cloning the original:
+
+```
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-pvc-copy2
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ceph-block
+  dataSource:
+    name: image-pvc
+    kind: PersistentVolumeClaim
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imagetest2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: imagetest2
+  template:
+    metadata:
+      labels:
+        app: imagetest2
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: main
+        image: ubuntu
+        command: ["/bin/sh", -c, "sleep 72000"]
+        volumeMounts:
+        - name: fs
+          mountPath: /mnt/fs
+      volumes:
+      - name: fs
+        persistentVolumeClaim:
+          claimName: image-pvc-copy2
+          readOnly: false
+EOF
+```
+
+Update the content on the original block volume after cloning:
+
+```
+kubectl exec -it deployment/imagetest -- sh -c 'echo $@ > /mnt/fs/file ; sync' sh Hello world "$(date)" '(after cloning)'
+```
+
+Check the content on the block volume created by cloning as well as the original volume:
+
+```
+kubectl exec -it deployment/imagetest2 -- sh -c 'cat /mnt/fs/file'
+kubectl exec -it deployment/imagetest  -- sh -c 'cat /mnt/fs/file'
 ```
