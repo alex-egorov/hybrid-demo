@@ -3,10 +3,62 @@ metadata:
   name: demo-hybrid-1-aws
   space: default
 spec:
+  features:
+    ingress:
+      chart:
+        version: 1.21.2-24
+      ingressControllers:
+        - nginx:
+            enabled: true
+            acme:
+              enabled: false
+      values:
+        nginx-ingress:
+          controller:
+            service:
+              annotations:
+                service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    kubedb:
+      chart:
+        version: 1.21.2-25
+      enabled: false
+    kublrOperator:
+      chart:
+        version: 1.21.2-32
+      enabled: true
+    logging:
+      chart:
+        version: 1.21.2-37
+      logCollection:
+        enabled: false
+      sinks:
+        - selfHosted:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: false
+            masterNodes: 1
+        - centralLogging:
+            clientNodes: 1
+            dataNodes: 1
+            enabled: true
+            logstashReplicas: 1
+            masterNodes: 1
+            persistent: true
+            size: 128G
+    monitoring:
+      chart:
+        version: 1.21.2-28
+      enabled: true
+      platformClient:
+        enabled: true
+        prometheus:
+          persistent: false
+    system:
+      chart:
+        version: 1.21.2-30
   kublrAgentTgzUrl: 'https://repo.kublr.com/repository/gobinaries/kublr/1.20.9-18/kublr-1.20.9-18-linux.tar.gz'
   locations:
-    - name: aws1
-      aws:
+    - aws:
         awsApiAccessSecretRef: aws
         enableTerminationProtection: false
         region: us-east-1
@@ -35,28 +87,20 @@ spec:
               IpProtocol: udp
               FromPort: 4500
               ToPort: 4500
-  network:
-    clusterCIDR: 100.64.0.0/10
-    dnsDomain: cluster1.local
-    apiServerSecurePort: 6443
-    enableLocalDns: false
-    provider: cni-flannel
-    stubDomains:
-      - dns: cluster2.local
-        servers:
-          - 100.128.0.10
+      name: aws1
   master:
-    minNodes: 1
-    kublrVariant: aws-ubuntu-20.04
     kublrAgentConfig:
       kublr:
         psp:
           default_clusterrole: 'psp:privileged'
+    kublrVariant: aws-ubuntu-20.04
     locations:
-      - locationRef: aws1
-        aws:
-          instanceType: m5.large
+      - aws:
+          availabilityZones:
+            - us-east-1a
           groupType: asg-mip
+          instanceMonitoring: false
+          instanceType: m5.large
           mixedInstancesPolicyCloudFormationExtras:
             InstancesDistribution:
               OnDemandPercentageAboveBaseCapacity: 0
@@ -64,17 +108,25 @@ spec:
               Overrides:
                 - InstanceType: m5.large
                 - InstanceType: t3.large
-          availabilityZones:
-            - us-east-1a
-          instanceMonitoring: false
           rootVolume:
             size: 40
           sshKey: cloudify
           subnetIds:
             - ''
+        locationRef: aws1
+    minNodes: 1
+  network:
+    apiServerSecurePort: 6443
+    clusterCIDR: 100.64.0.0/10
+    dnsDomain: cluster1.local
+    enableLocalDns: false
+    provider: cni-flannel
+    stubDomains:
+      - dns: cluster2.local
+        servers:
+          - 100.128.0.10
   nodes:
-    - name: group1
-      minNodes: 3
+    - autoscaling: false
       kublrVariant: aws-ubuntu-20.04
       stateful: true
       kublrAgentConfig:
@@ -83,8 +135,13 @@ spec:
       locations:
         - locationRef: aws1
           aws:
-            instanceType: m5.xlarge
+            availabilityZones:
+              - us-east-1a
+              - us-east-1b
+              - us-east-1c
             groupType: asg-mip
+            instanceMonitoring: false
+            instanceType: m5.xlarge
             mixedInstancesPolicyCloudFormationExtras:
               InstancesDistribution:
                 OnDemandPercentageAboveBaseCapacity: 0
@@ -92,72 +149,16 @@ spec:
                 Overrides:
                   - InstanceType: m5.xlarge
                   - InstanceType: t3.xlarge
-            instanceMonitoring: false
             pinToZone: pin
             rootVolume:
               size: 40
-            availabilityZones:
-              - us-east-1a
-              - us-east-1b
-              - us-east-1c
             sshKey: cloudify
             subnetIds:
               - ''
               - ''
               - ''
-  features:
-    kublrOperator:
-      chart:
-        version: 1.21.2-32
-      enabled: true
-    system:
-      chart:
-        version: 1.21.2-30
-    logging:
-      chart:
-        version: 1.21.2-37
-      logCollection:
-        enabled: false
-      sinks:
-        - selfHosted:
-            enabled: false
-            masterNodes: 1
-            dataNodes: 1
-            clientNodes: 1
-        - centralLogging:
-            enabled: true
-            persistent: true
-            size: 128G
-            masterNodes: 1
-            dataNodes: 1
-            clientNodes: 1
-            logstashReplicas: 1
-    monitoring:
-      chart:
-        version: 1.21.2-28
-      enabled: true
-      platformClient:
-        enabled: true
-        prometheus:
-          persistent: false
-    ingress:
-      chart:
-        version: 1.21.2-24
-      ingressControllers:
-        - nginx:
-            enabled: true
-            acme:
-              enabled: false
-      values:
-        nginx-ingress:
-          controller:
-            service:
-              annotations:
-                service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-    kubedb:
-      chart:
-        version: 1.21.2-25
-      enabled: false
+      minNodes: 3
+      name: group1
   packages:
     submariner-broker:
       helmVersion: '3.4.0'
