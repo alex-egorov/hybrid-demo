@@ -4,15 +4,31 @@
 * jq
 * kubectl 1.21
 
-# 2. Deploy cluster
+# 2. Deploy k8s clusters
 
 Create clusters in Kublr UI or API.
 
-Wait for all statuses become green, including 4 packages in the end of the status page - `rook-ceph-additional-configuration`, `rook-ceph`, `rook-ceph-cluster`, `submariner-k8s-broker`
+Create `aws` and `azure` secret credentials in `default` space using Kublr UI or API.
+
+Create clusters `demo-hybrid-1-aws` and `demo-hybrid-2-azure` in `default` space via Kublr UI or API using cluster specificactions
+from the files `clusters/demo-hybrid-1-aws.yaml` and `clusters/demo-hybrid-2-azure.yaml` in this project.
+
+Wait for all statuses become green, including 4 packages in the end of the status page - `rook-ceph-additional-configuration`, `rook-ceph`, `rook-ceph-cluster`, `submariner-broker`
+
+Download the clusters' kubeconfig files via Kublr UI or API and save them in your current work directory under names `config1aws` and `config2az`.
 
 # 3. Download clusters' kubeconfig files
 
-Save the clusters' kubeconfig files into `config1aws` and `config2az`
+Download the clusters' kubeconfig files from Kublr UI or API and save them in your current work directory as `config1aws` and `config2az`.
+
+Verify that the clusters are available for CLI tools:
+
+```
+export KUBECONFIG=config1aws
+kubectl get nodes
+export KUBECONFIG=config2az
+kubectl get nodes
+```
 
 # 4. Check that Rook/Ceph is up
 
@@ -21,14 +37,14 @@ Access Ceph UI - see more info on https://rook.io/docs/rook/v1.7/ceph-dashboard.
 ```
 for C in config1aws config2az ; do
 echo
-echo "URL: http://$(kubectl --kubeconfig=$C get -n kube-system svc kublr-ingress-nginx-ingress-controller -o jsonpath="{.status.loadBalancer.ingress[0]['hostname','ip']}")/ceph-dashboard/"
+echo "URL: https://$(kubectl --kubeconfig=$C get -n kube-system svc kublr-ingress-nginx-ingress-controller -o jsonpath="{.status.loadBalancer.ingress[0]['hostname','ip']}")/ceph-dashboard/"
 echo "Username/Password: admin / $(kubectl --kubeconfig=$C  get -n rook-ceph secret rook-ceph-dashboard-password -o jsonpath="{['data']['password']}" | base64 --decode)"
 done
 ```
 
 # 5. Connect clusters with submariner
 
-## 5.1. Make sure that `subctl` is installed:
+## 5.1. Make sure that `subctl` is installed
 
 ```
 wget https://github.com/submariner-io/submariner-operator/releases/download/subctl-release-0.11/subctl-release-0.11-linux-amd64.tar.xz
@@ -36,7 +52,7 @@ tar xfv subctl-release-0.11-linux-amd64.tar.xz
 mv subctl-release-0.11/subctl-release-0.11-linux-amd64 subctl
 ```
 
-## 5.2. Prepare common submariner parameters:
+## 5.2. Prepare common submariner parameters
 
 ```
 export KUBECONFIG=config1aws
@@ -58,9 +74,9 @@ echo
 echo "KUBECONFIG=${KUBECONFIG}" ; echo
 echo "BROKER_NS=${BROKER_NS}" ; echo
 echo "SUBMARINER_NS=${SUBMARINER_NS}" ; echo
-echo "SUBMARINER_PSK=${SUBMARINER_PSK}" ; echo
+echo "SUBMARINER_PSK=${SUBMARINER_PSK:+***}" ; echo
 echo "SUBMARINER_BROKER_CA=${SUBMARINER_BROKER_CA}" ; echo
-echo "SUBMARINER_BROKER_TOKEN=${SUBMARINER_BROKER_TOKEN}" ; echo
+echo "SUBMARINER_BROKER_TOKEN=${SUBMARINER_BROKER_TOKEN:+***}" ; echo
 echo "SUBMARINER_BROKER_URL=${SUBMARINER_BROKER_URL}" ; echo
 ```
 
@@ -145,20 +161,29 @@ Deploy test server pods
 ```
 for C in config1aws config2az ; do
 kubectl --kubeconfig=$C apply -f - <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-srv
+  labels: { app: test-srv }
+spec:
+  selector: { app: test-srv }
+  ports:
+  - name: http
+    port: 5000
+    targetPort: 5000
+    protocol: TCP
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: test-srv
-  labels:
-    app: test-srv
+  labels: { app: test-srv }
 spec:
-  selector:
-    matchLabels:
-      app: test-srv
+  selector: { matchLabels: { app: test-srv } }
   template:
     metadata:
-      labels:
-        app: test-srv
+      labels: { app: test-srv }
     spec:
       containers:
         - name: srv
@@ -176,14 +201,31 @@ Wait for all pods to start on all nodes
 kubectl --kubeconfig=config1aws get pods -l app=test-srv ; kubectl --kubeconfig=config2az get pods -l app=test-srv
 ```
 
-Test that inter-pod connections work
+Test that inter-pod connections work across clusters
 
 ```
-for C in config1aws config2az ; do
-  for P in $(kubectl --kubeconfig=$C get pods -l app=test-srv -o name); do
-    for A in $(for C in config1aws config2az ; do kubectl --kubeconfig=$C get pods -l app=test-srv -o jsonpath='{.items[*].status.podIP}' ; echo ; done); do
-      echo -n "$P -> $A: "
-      kubectl --kubeconfig=$C exec $P -- curl -q http://$A:5000 1>/dev/null 2>&1 && echo OK || echo NOK
+for C1 in config1aws config2az ; do
+  for P1 in $(kubectl --kubeconfig=$C1 get pods -l app=test-srv -o name); do
+    for C2 in config1aws config2az ; do
+      for P2 in $(kubectl --kubeconfig=$C2 get pods -l app=test-srv -o name); do
+        A2="$(kubectl --kubeconfig=$C2 get $P2 -o jsonpath='{.status.podIP}')"
+        echo -n -e "$C1\t$P1\t-> $C2\t$P2\t$A2:\t"
+        kubectl --kubeconfig=$C1 exec $P1 -- curl -q http://$A2:5000 1>/dev/null 2>&1 && echo OK || echo NOK
+      done
+    done
+  done
+done
+```
+
+Test that pod to service connections work across clusters
+
+```
+for C2 in cluster1.local cluster2.local ; do
+  A2="test-srv.default.svc.$C2"
+  for C1 in config1aws config2az ; do
+    for P1 in $(kubectl --kubeconfig=$C1 get pods -l app=test-srv -o name); do
+      echo -n -e "$C1\t$P1\t-> $C2\t$A2:\t"
+      kubectl --kubeconfig=$C1 exec $P1 -- curl -q http://$A2:5000 1>/dev/null 2>&1 && echo OK || echo NOK
     done
   done
 done
@@ -364,6 +406,11 @@ kubectl patch VolumeReplication block-pvc-volumereplication --type merge -p '{"s
 
 Check AWS Ceph UI or use kubectl CLI and wait until the image is demoted there.
 
+```
+export KUBECONFIG=config1aws
+kubectl get volumereplication block-pvc-volumereplication -oyaml
+```
+
 Promote in Azure
 
 ```
@@ -392,13 +439,23 @@ kubectl patch VolumeReplication block-pvc-volumereplication --type merge -p '{"s
 
 Check Azure Ceph UI or use kubectl CLI and wait until the image is demoted there.
 
+```
+export KUBECONFIG=config2az
+kubectl get volumereplication block-pvc-volumereplication -oyaml
+```
+
 Promote in AWS
 
 ```
 export KUBECONFIG=config1aws
 kubectl patch VolumeReplication block-pvc-volumereplication --type merge -p '{"spec":{"replicationState":"primary"}}'
 kubectl scale deployment blocktest --replicas=1
+```
 
+Check that the application is started and can see replicated data
+
+```
+export KUBECONFIG=config1aws
 kubectl logs --tail=5 -f deployment/blocktest
 ```
 
@@ -526,6 +583,8 @@ kubectl exec -it deployment/imagetest -- sh -c 'cat /mnt/fs/file'
 
 ## 8.1. Create CephFS snapshot
 
+Create a CephFS snapshot class
+
 ```
 kubectl apply -f - <<EOF
 apiVersion: snapshot.storage.k8s.io/v1
@@ -539,7 +598,11 @@ parameters:
   csi.storage.k8s.io/snapshotter-secret-namespace: rook-ceph
 deletionPolicy: Delete
 EOF
+```
 
+Create a CephFS snapshot
+
+```
 kubectl apply -f - <<EOF
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
@@ -567,6 +630,8 @@ kubectl exec -it deployment/sharedfstest -- sh -c 'cat /mnt/fs/file'
 
 ## 8.2. Create RBD snapshot
 
+Create an RBD snapshot class
+
 ```
 kubectl apply -f - <<EOF
 apiVersion: snapshot.storage.k8s.io/v1
@@ -580,7 +645,11 @@ parameters:
   csi.storage.k8s.io/snapshotter-secret-namespace: rook-ceph
 deletionPolicy: Delete
 EOF
+```
 
+Create an RBD snapshot
+
+```
 kubectl apply -f - <<EOF
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
